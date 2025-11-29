@@ -6,7 +6,7 @@ import math
 import numpy as np
 import pygame
 import sys
-from threading import Thread
+from threading import Thread, Lock
 import requests
 import json
 
@@ -58,8 +58,8 @@ def test_sms():
     print("=" * 50)
 
     # Use the same number for testing as for emergencies
-    api_key = "YOUR_API_KEY"
-    numbers = "911234567890"  # Your number
+    api_key = "SnjyV7EB8q2Rtm1GJoZQwkv45DKI0cple6gMNWTXdsCfFAriLuoaFzGqCUSb2RWTMAL15n7gpshmIwik"
+    numbers = "917019370603"  # Your number
     test_message = "TEST: Driver Monitoring System SMS Test - System is working!"
 
     result = send_sms(api_key, numbers, test_message)
@@ -74,8 +74,8 @@ def test_sms():
 
 
 # SMS Configuration - USING YOUR NUMBER FOR BOTH TEST AND EMERGENCY
-SMS_API_KEY = "YOUR_API_KEY"
-SMS_NUMBERS = "911234567890"  # CHANGED TO YOUR NUMBER
+SMS_API_KEY = "SnjyV7EB8q2Rtm1GJoZQwkv45DKI0cple6gMNWTXdsCfFAriLuoaFzGqCUSb2RWTMAL15n7gpshmIwik"
+SMS_NUMBERS = "917019370603"  # CHANGED TO YOUR NUMBER
 SMS_EMERGENCY_THRESHOLD = 10  # Send SMS after 10 seconds of sleep
 SMS_NO_FACE_THRESHOLD = 10  # Send SMS after 10 seconds of no face detection
 sms_sent = False  # Flag to track if SMS has been sent for sleep
@@ -171,11 +171,14 @@ SLEEP_EMERGENCY_THRESHOLD_CAR = 3
 MANEUVER_DURATION = 4
 RECOVERY_DURATION = 5
 
-# No face emergency variables
+# No face emergency variables - WITH THREAD SAFETY
 no_face_emergency_triggered = False
-no_face_emergency_start_time = None
-NO_FACE_EMERGENCY_THRESHOLD = 10  # Stop car after 10 seconds of no face
+no_face_start_time = None
+NO_FACE_EMERGENCY_THRESHOLD = 3  # Stop car after 3 seconds of no face
 NO_FACE_RECOVERY_DURATION = 5  # Wait 5 seconds after face returns
+
+# Thread synchronization
+state_lock = Lock()
 
 # Indicator variables
 LEFT_TURN_INDICATOR_INTERVAL = 0.2  # Rapid blinking for left turns
@@ -186,6 +189,9 @@ in_emergency_sequence = False
 
 # Track if driver has ever slept
 driver_has_slept = False
+
+# Driver state for car simulation
+current_driver_state = "NORMAL"
 
 
 def init_car_simulation():
@@ -266,7 +272,8 @@ def draw_car():
                              (current_time - emergency_maneuver_start_time) > MANEUVER_DURATION * 0.5)
 
     # Check if we're in no face emergency
-    is_no_face_emergency = no_face_emergency_triggered
+    with state_lock:
+        is_no_face_emergency = no_face_emergency_triggered
 
     # Determine indicator state
     if is_moving_to_left_lane or (is_emergency_stopping and target_x == left_lane) or is_no_face_emergency:
@@ -373,7 +380,8 @@ def draw_dashboard():
                              emergency_maneuver_start_time and
                              (current_time - emergency_maneuver_start_time) > MANEUVER_DURATION * 0.5)
 
-    is_turning_left = is_moving_to_left_lane or (
+    with state_lock:
+        is_turning_left = is_moving_to_left_lane or (
                 is_emergency_stopping and target_x == left_lane) or no_face_emergency_triggered
 
     left_indicator_text = f"Left Indicator: {'BLINKING' if is_turning_left else 'OFF'}"
@@ -411,16 +419,20 @@ def draw_dashboard():
         else:
             status_text = "⚠️ DRIVER ASLEEP!"
     elif current_driver_state == "NO_FACE":
-        if no_face_start_time:
-            no_face_duration = time.time() - no_face_start_time
-            remaining_time = max(0, NO_FACE_EMERGENCY_THRESHOLD - no_face_duration)
-            status_text = f"⚠️ NO FACE DETECTED! Emergency stop in {remaining_time:.1f}s"
-
-            # Check for SMS sending condition
-            if no_face_duration >= SMS_NO_FACE_THRESHOLD and not no_face_sms_sent:
-                status_text += " - 📱 SMS SENT!"
-        else:
-            status_text = "⚠️ NO FACE DETECTED!"
+        with state_lock:
+            if no_face_start_time:
+                no_face_duration = time.time() - no_face_start_time
+                # Show different messages based on whether car has stopped or not
+                if no_face_duration >= NO_FACE_EMERGENCY_THRESHOLD:
+                    status_text = "🚨 NO FACE! CAR STOPPED"
+                    # Check for SMS sending condition (10 seconds)
+                    if no_face_duration >= SMS_NO_FACE_THRESHOLD and not no_face_sms_sent:
+                        status_text += " - 📱 SMS SENT!"
+                else:
+                    remaining_time = max(0, NO_FACE_EMERGENCY_THRESHOLD - no_face_duration)
+                    status_text = f"⚠️ NO FACE DETECTED! Car stops in {remaining_time:.1f}s"
+            else:
+                status_text = "⚠️ NO FACE DETECTED!"
     elif in_emergency_sequence:
         if recovery_start_time:
             wait_elapsed = time.time() - recovery_start_time
@@ -450,7 +462,7 @@ def update_car():
     global car_x, car_speed, target_x, emergency_triggered_car, sleep_start_time_car
     global emergency_maneuver_start_time, recovery_start_time
     global emergency_completed, in_emergency_sequence, driver_has_slept
-    global no_face_emergency_triggered, no_face_emergency_start_time
+    global no_face_emergency_triggered, no_face_start_time, current_driver_state
 
     # Handle Pygame events
     for event in pygame.event.get():
@@ -464,19 +476,25 @@ def update_car():
         driver_has_slept = True
         print("Starting emergency sequence...")
 
-    # Handle no face emergency
-    if current_driver_state == "NO_FACE" and no_face_start_time:
-        no_face_duration = time.time() - no_face_start_time
+    # Handle no face emergency - CAR STOPS AFTER 3 SECONDS
+    with state_lock:
+        is_no_face = current_driver_state == "NO_FACE"
+        current_no_face_start_time = no_face_start_time
+        current_no_face_emergency = no_face_emergency_triggered
 
-        if no_face_duration >= NO_FACE_EMERGENCY_THRESHOLD and not no_face_emergency_triggered:
-            no_face_emergency_triggered = True
-            no_face_emergency_start_time = time.time()
-            print("NO FACE EMERGENCY: Stopping car with indicators!")
+    if is_no_face and current_no_face_start_time:
+        no_face_duration = time.time() - current_no_face_start_time
+
+        # Stop car after 3 seconds of no face
+        if no_face_duration >= NO_FACE_EMERGENCY_THRESHOLD and not current_no_face_emergency:
+            with state_lock:
+                no_face_emergency_triggered = True
+            print(f"NO FACE EMERGENCY: Stopping car after {no_face_duration:.1f} seconds!")
 
     # Reset no face emergency when face is detected again
     if current_driver_state != "NO_FACE" and no_face_emergency_triggered:
-        no_face_emergency_triggered = False
-        no_face_emergency_start_time = None
+        with state_lock:
+            no_face_emergency_triggered = False
         print("NO FACE EMERGENCY: Face detected, resuming normal operation")
 
     if in_emergency_sequence:
@@ -485,15 +503,10 @@ def update_car():
             sleep_duration = time.time() - sleep_start_time_car
 
             if sleep_duration < SLEEP_EMERGENCY_THRESHOLD_CAR:
-                # Countdown phase - maintain normal driving but STAY IN LEFT LANE if driver has slept before
+                # Countdown phase - maintain normal driving
                 if car_speed < max_speed:
                     car_speed += acceleration
-
-                # FIX: Always stay in left lane if driver has slept at least once
-                if driver_has_slept:
-                    target_x = left_lane
-                else:
-                    target_x = center_lane
+                target_x = center_lane  # Stay in center lane during countdown
             else:
                 # Emergency maneuver phase
                 if not emergency_triggered_car:
@@ -505,14 +518,9 @@ def update_car():
                     maneuver_progress = min(1.0, (time.time() - emergency_maneuver_start_time) / MANEUVER_DURATION)
 
                     if maneuver_progress < 0.5:
-                        # Move to left lane with indicators blinking (only if not already in left lane)
-                        if not driver_has_slept:  # Only move to left lane if it's the first sleep
-                            lane_progress = maneuver_progress / 0.5
-                            target_x = center_lane + (left_lane - center_lane) * lane_progress
-                        else:
-                            # Already in left lane from previous sleep, just stay there
-                            target_x = left_lane
-
+                        # Move to left lane with indicators blinking
+                        lane_progress = maneuver_progress / 0.5
+                        target_x = center_lane + (left_lane - center_lane) * lane_progress
                         if car_speed < max_speed:
                             car_speed += acceleration
                     else:
@@ -558,7 +566,7 @@ def update_car():
                         emergency_maneuver_start_time = None
                         print("Recovery complete! Continuing in left lane.")
     elif no_face_emergency_triggered:
-        # No face emergency - stop the car with blinking indicators
+        # No face emergency - stop the car with blinking indicators (AFTER 3 SECONDS)
         car_speed = 0
         target_x = left_lane  # Stay in current lane or move to left lane
     else:
@@ -631,13 +639,14 @@ HEAD_POSE_LANDMARKS = [33, 263, 1, 61, 291, 199]
 # Thresholds
 EYE_CLOSED_THRESHOLD = 0.23
 
-# Sleep detection variables
+# Sleep detection variables - FIXED: Only trigger after continuous 3 seconds
 sleep_start_time = None
-SLEEP_EMERGENCY_THRESHOLD = 3
+SLEEP_EMERGENCY_THRESHOLD = 3  # Only trigger after 3 seconds of continuous sleep
 emergency_triggered = False
 
-# No face detection variables
-no_face_start_time = None
+# Track continuous sleep state
+continuous_sleep_start = None
+last_eye_state = "OPEN"
 
 # Driver state for car simulation
 current_driver_state = "NORMAL"
@@ -760,23 +769,26 @@ def draw_status_panel(frame, text, position, bg_color, text_color=(255, 255, 255
 
 
 # -----------------------------
-# MAIN LOOP - IMPROVED LAYOUT
+# MAIN LOOP - FIXED SLEEP DETECTION
 # -----------------------------
 def main():
     global sleep_start_time, emergency_triggered, current_driver_state, car_running
-    global sms_sent, sms_test_completed, no_face_start_time, no_face_sms_sent
+    global sms_sent, sms_test_completed, no_face_start_time, no_face_sms_sent, no_face_emergency_triggered
+    global continuous_sleep_start, last_eye_state
 
     print("Starting Driver Monitoring System with NodeMCU AP Connection and SMS")
     print(f"NodeMCU AP: {NODEMCU_AP_IP}:{NODEMCU_AP_PORT}")
     print(f"SMS Emergency Threshold: {SMS_EMERGENCY_THRESHOLD} seconds")
     print(f"SMS No Face Threshold: {SMS_NO_FACE_THRESHOLD} seconds")
     print(f"No Face Emergency Stop Threshold: {NO_FACE_EMERGENCY_THRESHOLD} seconds")
+    print("IMPROVED: Sleep detection now requires CONTINUOUS 3+ seconds of closed eyes")
     print("Make sure your computer is connected to the NodeMCU Access Point!")
     print("SMS will be sent when:")
     print("  - Driver is asleep for 10+ seconds")
     print("  - No face detected for 10+ seconds")
     print("Car will stop when:")
-    print("  - No face detected for 10+ seconds")
+    print("  - No face detected for 3+ seconds")
+    print("  - Eyes continuously closed for 3+ seconds")
     print("Press 'T' to manually test SMS functionality")
 
     # Start car simulation in a separate thread
@@ -832,41 +844,76 @@ def main():
                 # Head pose detection
                 head_direction, x_angle, y_angle, z_angle, nose_2d, nose_3d = get_head_pose(landmarks, frame.shape)
 
-                # Combined sleep detection
+                # IMPROVED SLEEP DETECTION: Only trigger after continuous 3 seconds
+                current_time = time.time()
                 slept_detected = False
-                if eye_state == "BOTH_CLOSED" and (head_direction == "LOOKING_DOWN" or chin_below_shoulders(landmarks)):
-                    slept_detected = True
-                    combined_state = "DRIVER_SLEPT"
-                    current_driver_state = "DRIVER_SLEPT"
 
-                    if sleep_start_time is None:
-                        sleep_start_time = time.time()
-                        sms_sent = False  # Reset SMS flag when sleep starts
-                        print(f"Sleep detected at {time.strftime('%H:%M:%S')}")
+                # Check if conditions for sleep are met (both eyes closed AND head down)
+                sleep_conditions_met = (eye_state == "BOTH_CLOSED" and
+                                        (head_direction == "LOOKING_DOWN" or chin_below_shoulders(landmarks)))
 
-                    sleep_duration = time.time() - sleep_start_time
+                if sleep_conditions_met:
+                    # Start continuous sleep timer if not already started
+                    if continuous_sleep_start is None:
+                        continuous_sleep_start = current_time
+                        print(f"Continuous sleep detection started at {time.strftime('%H:%M:%S')}")
 
-                    # Check if we need to send SMS
-                    if sleep_duration >= SMS_EMERGENCY_THRESHOLD and not sms_sent:
-                        print(f"⏰ SMS Trigger: Sleep duration {sleep_duration:.1f}s >= {SMS_EMERGENCY_THRESHOLD}s")
-                        sms_message = f"🚨 EMERGENCY ALERT: Driver asleep for {sleep_duration:.1f}s! Vehicle has initiated safety protocol. Time: {time.strftime('%H:%M:%S')}"
-                        sms_result = send_sms(SMS_API_KEY, SMS_NUMBERS, sms_message)
-                        sms_sent = sms_result  # Only mark as sent if successful
-                        if sms_result:
-                            print(f"✓ Emergency SMS sent after {sleep_duration:.1f} seconds of sleep")
-                        else:
-                            print(f"✗ Failed to send emergency SMS")
+                    # Calculate continuous sleep duration
+                    continuous_sleep_duration = current_time - continuous_sleep_start
 
-                    if sleep_duration >= SLEEP_EMERGENCY_THRESHOLD and not emergency_triggered:
-                        emergency_triggered = True
-                        print("EMERGENCY: Driver slept for more than 3 seconds!")
+                    # Only trigger sleep after 3 seconds of continuous sleep
+                    if continuous_sleep_duration >= SLEEP_EMERGENCY_THRESHOLD:
+                        slept_detected = True
+                        combined_state = "DRIVER_SLEPT"
+                        current_driver_state = "DRIVER_SLEPT"
+
+                        # Set sleep_start_time for SMS and car simulation
+                        if sleep_start_time is None:
+                            sleep_start_time = continuous_sleep_start  # Use the continuous start time
+                            sms_sent = False  # Reset SMS flag when sleep starts
+                            print(
+                                f"Sleep CONFIRMED after {continuous_sleep_duration:.1f}s at {time.strftime('%H:%M:%S')}")
+
+                        sleep_duration = current_time - sleep_start_time
+
+                        # Check if we need to send SMS
+                        if sleep_duration >= SMS_EMERGENCY_THRESHOLD and not sms_sent:
+                            print(f"⏰ SMS Trigger: Sleep duration {sleep_duration:.1f}s >= {SMS_EMERGENCY_THRESHOLD}s")
+                            sms_message = f"🚨 EMERGENCY ALERT: Driver asleep for {sleep_duration:.1f}s! Vehicle has initiated safety protocol. Time: {time.strftime('%H:%M:%S')}"
+                            sms_result = send_sms(SMS_API_KEY, SMS_NUMBERS, sms_message)
+                            sms_sent = sms_result  # Only mark as sent if successful
+                            if sms_result:
+                                print(f"✓ Emergency SMS sent after {sleep_duration:.1f} seconds of sleep")
+                            else:
+                                print(f"✗ Failed to send emergency SMS")
+
+                        if sleep_duration >= SLEEP_EMERGENCY_THRESHOLD and not emergency_triggered:
+                            emergency_triggered = True
+                            print("EMERGENCY: Driver slept for more than 3 seconds!")
+
+                    else:
+                        # Still in continuous sleep but not long enough yet
+                        combined_state = "NORMAL"
+                        current_driver_state = "NORMAL"
+                        remaining_time = SLEEP_EMERGENCY_THRESHOLD - continuous_sleep_duration
+                        print(
+                            f"Eyes closed for {continuous_sleep_duration:.1f}s - need {remaining_time:.1f}s more for emergency")
 
                 else:
+                    # Sleep conditions not met - reset continuous sleep timer
+                    if continuous_sleep_start is not None:
+                        continuous_duration = current_time - continuous_sleep_start
+                        if continuous_duration > 0.5:  # Only log if it was significant
+                            print(f"Continuous sleep interrupted after {continuous_duration:.1f}s")
+                        continuous_sleep_start = None
+
                     combined_state = "NORMAL"
                     current_driver_state = "NORMAL"
+
+                    # Reset sleep detection if eyes are open or head is not down
                     if sleep_start_time is not None:
                         # Only reset if driver was previously sleeping
-                        sleep_duration = time.time() - sleep_start_time
+                        sleep_duration = current_time - sleep_start_time
                         if sleep_duration > 1:  # Only log if sleep was significant
                             print(f"Driver woke up after {sleep_duration:.1f}s sleep")
                         sleep_start_time = None
@@ -875,13 +922,18 @@ def main():
                         emergency_triggered = False
                         print("Emergency cleared - driver awake")
 
+                # Update last eye state
+                last_eye_state = eye_state
+
                 # Reset no face detection when face is detected
-                if no_face_start_time is not None:
-                    no_face_duration = time.time() - no_face_start_time
-                    if no_face_duration > 1:  # Only log if no face was significant
-                        print(f"Face detected after {no_face_duration:.1f}s of no face")
-                    no_face_start_time = None
-                    no_face_sms_sent = False  # Reset SMS flag when face is detected again
+                with state_lock:
+                    if no_face_start_time is not None:
+                        no_face_duration = current_time - no_face_start_time
+                        if no_face_duration > 1:  # Only log if no face was significant
+                            print(f"Face detected after {no_face_duration:.1f}s of no face")
+                        no_face_start_time = None
+                        no_face_sms_sent = False  # Reset SMS flag when face is detected again
+                        no_face_emergency_triggered = False  # Reset emergency state
 
                 # Send simplified state to NodeMCU
                 send_udp(combined_state)
@@ -914,6 +966,14 @@ def main():
                 draw_status_panel(display_frame, f"Z: {z_angle:.1f}", (220, y_offset + line_height * 4),
                                   (0, 0, 100), (255, 255, 255))
 
+                # Continuous sleep timer display
+                if continuous_sleep_start is not None:
+                    continuous_duration = current_time - continuous_sleep_start
+                    if continuous_duration < SLEEP_EMERGENCY_THRESHOLD:
+                        draw_status_panel(display_frame, f"CONTINUOUS CLOSED: {continuous_duration:.1f}s",
+                                          (20, y_offset + line_height * 5),
+                                          (0, 50, 100), (0, 255, 255))
+
                 # Main state with prominent display
                 status_color = (0, 0, 200) if slept_detected else (0, 200, 0)
                 status_bg = (0, 0, 100) if slept_detected else (0, 100, 0)
@@ -922,7 +982,7 @@ def main():
                                   status_bg, status_color)
 
                 if slept_detected and sleep_start_time is not None:
-                    sleep_duration = time.time() - sleep_start_time
+                    sleep_duration = current_time - sleep_start_time
                     draw_status_panel(display_frame, f"SLEEP TIMER: {sleep_duration:.1f}s",
                                       (display_frame.shape[1] - 300, y_offset + line_height),
                                       (0, 0, 100), (0, 0, 255))
@@ -938,12 +998,12 @@ def main():
 
                     if emergency_triggered:
                         draw_status_panel(display_frame, "EMERGENCY! SAFETY MANEUVER ACTIVATED",
-                                          (display_frame.shape[1] // 2 - 200, y_offset + line_height * 5),
+                                          (display_frame.shape[1] // 2 - 200, y_offset + line_height * 6),
                                           (0, 0, 100), (0, 0, 255))
                     else:
                         remaining_time = max(0, SLEEP_EMERGENCY_THRESHOLD - sleep_duration)
                         draw_status_panel(display_frame, f"DRIVER ASLEEP! Emergency in {remaining_time:.1f}s",
-                                          (display_frame.shape[1] // 2 - 200, y_offset + line_height * 5),
+                                          (display_frame.shape[1] // 2 - 200, y_offset + line_height * 6),
                                           (0, 50, 100), (0, 255, 255))
 
                 # Draw head pose direction line
@@ -967,15 +1027,21 @@ def main():
                 current_driver_state = "NO_FACE"
                 send_udp("NO_FACE")
 
+                # Reset continuous sleep when no face is detected
+                if continuous_sleep_start is not None:
+                    continuous_sleep_start = None
+
                 # Start no face timer if not already started
-                if no_face_start_time is None:
-                    no_face_start_time = time.time()
-                    print(f"No face detected at {time.strftime('%H:%M:%S')}")
+                with state_lock:
+                    if no_face_start_time is None:
+                        no_face_start_time = time.time()
+                        print(f"No face detected at {time.strftime('%H:%M:%S')}")
 
-                # Calculate no face duration
-                no_face_duration = time.time() - no_face_start_time
+                    # Calculate no face duration
+                    no_face_duration = time.time() - no_face_start_time
 
-                # Check if we need to send SMS for no face
+                # CAR STOPS AFTER 3 SECONDS OF NO FACE - This is now handled in the car simulation thread
+                # Check if we need to send SMS for no face (AFTER 10 SECONDS)
                 if no_face_duration >= SMS_NO_FACE_THRESHOLD and not no_face_sms_sent:
                     print(f"⏰ No Face SMS Trigger: Duration {no_face_duration:.1f}s >= {SMS_NO_FACE_THRESHOLD}s")
                     sms_message = f"🚨 ALERT: Driver not in position for {no_face_duration:.1f}s! No face detected. Time: {time.strftime('%H:%M:%S')}"
@@ -991,32 +1057,38 @@ def main():
                 if emergency_triggered:
                     emergency_triggered = False
 
-                # Display no face status
+                # Display no face status with clear timing information
                 draw_status_panel(display_frame, "NO FACE DETECTED",
                                   (display_frame.shape[1] // 2 - 100, 50),
                                   (0, 0, 100), (0, 0, 255))
 
-                # Show no face timer and SMS status
+                # Show no face timer and status
                 draw_status_panel(display_frame, f"NO FACE TIMER: {no_face_duration:.1f}s",
                                   (display_frame.shape[1] // 2 - 100, 100),
                                   (0, 0, 100), (0, 0, 255))
 
+                # Show car stop status
+                if no_face_duration >= NO_FACE_EMERGENCY_THRESHOLD:
+                    draw_status_panel(display_frame, "🚨 CAR STOPPED (3s no face)",
+                                      (display_frame.shape[1] // 2 - 150, 150),
+                                      (0, 0, 100), (0, 0, 255))
+                else:
+                    remaining_time = max(0, NO_FACE_EMERGENCY_THRESHOLD - no_face_duration)
+                    draw_status_panel(display_frame, f"Car stops in: {remaining_time:.1f}s",
+                                      (display_frame.shape[1] // 2 - 100, 150),
+                                      (0, 50, 100), (0, 255, 255))
+
+                # Show SMS status
                 if no_face_duration >= SMS_NO_FACE_THRESHOLD:
                     no_face_sms_status = "NO FACE SMS: SENT" if no_face_sms_sent else "NO FACE SMS: PENDING"
                     no_face_sms_color = (0, 255, 0) if no_face_sms_sent else (0, 255, 255)
                     no_face_sms_bg = (0, 100, 0) if no_face_sms_sent else (0, 100, 100)
                     draw_status_panel(display_frame, no_face_sms_status,
-                                      (display_frame.shape[1] // 2 - 100, 150),
+                                      (display_frame.shape[1] // 2 - 100, 200),
                                       no_face_sms_bg, no_face_sms_color)
-
-                # Show emergency stop warning
-                if no_face_duration >= NO_FACE_EMERGENCY_THRESHOLD:
-                    draw_status_panel(display_frame, "🚨 EMERGENCY STOP ACTIVATED!",
-                                      (display_frame.shape[1] // 2 - 150, 200),
-                                      (0, 0, 100), (0, 0, 255))
                 else:
-                    remaining_time = max(0, NO_FACE_EMERGENCY_THRESHOLD - no_face_duration)
-                    draw_status_panel(display_frame, f"Emergency stop in {remaining_time:.1f}s",
+                    sms_remaining_time = max(0, SMS_NO_FACE_THRESHOLD - no_face_duration)
+                    draw_status_panel(display_frame, f"SMS in: {sms_remaining_time:.1f}s",
                                       (display_frame.shape[1] // 2 - 100, 200),
                                       (0, 50, 100), (0, 255, 255))
 
